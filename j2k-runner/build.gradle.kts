@@ -16,22 +16,22 @@ dependencies {
     intellijPlatform {
         intellijIdeaCommunity(libs.versions.intellijPlatform.get())
         bundledPlugin("com.intellij.java")
+        bundledPlugin("com.intellij.gradle")
         bundledPlugin("org.jetbrains.kotlin")
     }
 }
 
 kotlin {
-    jvmToolchain(21) // IntelliJ Platform 2025.1+ requires JDK 21
+    jvmToolchain(17)
 }
 
 intellijPlatform {
     pluginConfiguration {
         ideaVersion {
-            sinceBuild = "251"
-            untilBuild = provider { null }
+            sinceBuild = "241"
+            untilBuild = "243.*"
         }
     }
-
     buildSearchableOptions = false
     instrumentCode = false
 }
@@ -65,13 +65,8 @@ tasks.named<org.jetbrains.intellij.platform.gradle.tasks.RunIdeTask>("runIde") {
     jvmArgumentProviders.add(CommandLineArgumentProvider {
         listOf(
             "-Djava.awt.headless=true",
-            "-Didea.suppress.statistics.report=true",
-            // Force K1 mode for J2K. K2 J2K's post-processor demands a fully-configured
-            // K2 module context (Kotlin facet, SDK, etc.) which we don't construct in
-            // headless. K1_NEW is more permissive and is what Meta's headless J2K used.
-            // We can re-enable K2 once we either (a) build proper module config or
-            // (b) call J2kConverterExtension.setUpAndConvert which handles facet setup.
-            "-Didea.kotlin.plugin.use.k2=false"
+            "-Didea.headless.enable.statistics=false",
+            "-Didea.platform.prefix=Idea"
         )
     })
 }

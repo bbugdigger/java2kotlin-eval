@@ -1,26 +1,30 @@
 package io.github.bbugdigger.j2keval.runner
 
 import com.intellij.ide.impl.OpenProjectTask
-import com.intellij.ide.impl.ProjectUtil
-import com.intellij.openapi.application.ModernApplicationStarter
+import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.application.ApplicationStarter
 import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.module.Module
 import com.intellij.openapi.module.ModuleManager
+import com.intellij.openapi.project.DumbService
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.project.ex.ProjectManagerEx
 import com.intellij.openapi.vfs.LocalFileSystem
+import com.intellij.openapi.vfs.VfsUtil
+import com.intellij.openapi.vfs.VirtualFile
+import com.intellij.openapi.vfs.VirtualFileVisitor
 import com.intellij.psi.PsiJavaFile
 import com.intellij.psi.PsiManager
-import org.jetbrains.kotlin.idea.base.plugin.KotlinPluginModeProvider
-import org.jetbrains.kotlin.j2k.ConverterSettings
-import org.jetbrains.kotlin.j2k.J2kConverterExtension
+import org.jetbrains.kotlin.idea.actions.JavaToKotlinAction
+import org.jetbrains.kotlin.psi.KtFile
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
-import kotlin.io.path.absolutePathString
+import java.nio.file.StandardCopyOption
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.io.path.createDirectories
-import kotlin.io.path.relativeTo
-import kotlin.io.path.writeText
+import kotlin.io.path.exists
+import kotlin.io.path.isDirectory
 import kotlin.system.exitProcess
 
 /**
@@ -28,30 +32,61 @@ import kotlin.system.exitProcess
  *
  *     idea j2k --project=<dir> --input=<dir> --output=<dir>
  *
- * `--project` is the project root (used for module/SDK resolution); defaults to `--input`
- * when not provided. Walks all `.java` files under `--input`, converts each via
- * J2kConverterExtension (K1_NEW for headless reliability), and writes `.kt` files to
- * `--output` preserving the input-relative path.
+ * Behaviour:
+ *  - `--input` is the source tree containing `.java` files (typically `<project>/src/main/java`).
+ *  - `--project` is the IntelliJ project root (the dir with `pom.xml` / `build.gradle`).
+ *    Defaults to `--input` if omitted. Used so IntelliJ's project model can resolve
+ *    classpaths via Maven/Gradle import.
+ *  - `--output` is where converted `.kt` files land. The runner copies `--input` to
+ *    `<output>/.work/`, opens that copy as the project, runs J2K (which mutates files
+ *    in place — `.java` → `.kt`), then moves the resulting `.kt` files into `--output`
+ *    preserving the input-relative path. The original `--input` tree is never mutated.
+ *
+ * Why a copy: `JavaToKotlinAction.Handler.convertFiles` modifies files in place,
+ * deleting `.java` and creating `.kt` siblings. Mutating a git submodule is not
+ * acceptable for a CI-friendly pipeline, so we sandbox the conversion in a working
+ * copy under `<output>/.work/`.
  */
-class J2kRunnerStarter : ModernApplicationStarter() {
+class J2kRunnerStarter : ApplicationStarter {
+
+    // ApplicationStarter is deprecated in newer platforms in favour of
+    // ModernApplicationStarter, but the modern variant doesn't exist in 2024.1.
     @Suppress("OVERRIDE_DEPRECATION")
     override val commandName: String = "j2k"
 
-    override suspend fun start(args: List<String>) {
-        try {
-            val parsed = parseArgs(args)
-            runConversion(parsed)
-            exitProcess(0)
-        } catch (t: Throwable) {
-            System.err.println("J2K runner failed: ${t.message}")
-            t.printStackTrace(System.err)
-            exitProcess(1)
+    override fun main(args: List<String>) {
+        // ApplicationStarter.main runs on the EDT under a write-intent lock.
+        // J2K's Handler.convertFiles internally schedules WriteCommandActions back to
+        // the EDT, so blocking here would self-deadlock. Hand off to a pooled thread
+        // and exit the application from there once the work is done.
+        val app = ApplicationManager.getApplication()
+        app.executeOnPooledThread {
+            var exitCode = 0
+            try {
+                runConversion(parseArgs(args))
+                log("success")
+            } catch (t: Throwable) {
+                System.err.println("[j2k-runner] FAILED: ${t.javaClass.simpleName}: ${t.message}")
+                t.printStackTrace(System.err)
+                exitCode = 1
+            } finally {
+                app.exit(/*force =*/ true, /*exitConfirmed =*/ true, /*restart =*/ false)
+                if (exitCode != 0) {
+                    // Application.exit doesn't carry an exit code. Force one for CI
+                    // after a brief grace period so app.exit's own shutdown can run.
+                    Thread {
+                        Thread.sleep(2000)
+                        exitProcess(exitCode)
+                    }.start()
+                }
+            }
         }
     }
 
     private data class Args(val projectPath: Path, val inputPath: Path, val outputPath: Path)
 
     private fun parseArgs(args: List<String>): Args {
+        // args[0] == "j2k" (command name)
         var projectPath: String? = null
         var inputPath: String? = null
         var outputPath: String? = null
@@ -63,135 +98,204 @@ class J2kRunnerStarter : ModernApplicationStarter() {
                 else -> error("Unknown argument: $arg")
             }
         }
-        require(inputPath != null) { "--input is required" }
-        require(outputPath != null) { "--output is required" }
+        val inp = requireNotNull(inputPath) { "--input is required" }
+        val out = requireNotNull(outputPath) { "--output is required" }
         return Args(
-            projectPath = Paths.get(projectPath ?: inputPath!!).toAbsolutePath().normalize(),
-            inputPath = Paths.get(inputPath!!).toAbsolutePath().normalize(),
-            outputPath = Paths.get(outputPath!!).toAbsolutePath().normalize()
+            projectPath = Paths.get(projectPath ?: inp).toAbsolutePath().normalize(),
+            inputPath = Paths.get(inp).toAbsolutePath().normalize(),
+            outputPath = Paths.get(out).toAbsolutePath().normalize()
         )
     }
 
-    private suspend fun runConversion(args: Args) {
+    private fun runConversion(args: Args) {
         log("project=${args.projectPath}")
         log("input  =${args.inputPath}")
         log("output =${args.outputPath}")
-        require(Files.isDirectory(args.projectPath)) { "Project path is not a directory: ${args.projectPath}" }
-        require(Files.isDirectory(args.inputPath)) { "Input path is not a directory: ${args.inputPath}" }
-        args.outputPath.createDirectories()
+        require(args.projectPath.isDirectory()) { "Project path is not a directory: ${args.projectPath}" }
+        require(args.inputPath.isDirectory()) { "Input path is not a directory: ${args.inputPath}" }
 
-        log("step 1: openProject…")
-        val project = openProject(args.projectPath)
-        log("step 1 OK: project=${project.name}, modules=${ModuleManager.getInstance(project).modules.size}")
+        // Sandbox the conversion in <output>/.work/ so the original input tree is preserved.
+        val workRoot = args.outputPath.resolve(".work")
+        if (workRoot.exists()) {
+            log("step 0: cleaning previous work directory at $workRoot")
+            workRoot.toFile().deleteRecursively()
+        }
+        workRoot.createDirectories()
 
-        // Don't explicitly close the project here. forceCloseProject requires EDT +
-        // write-intent threading we don't hold, and exitProcess() at the end of start()
-        // tears down the application cleanly anyway.
-        log("step 2: convertFiles…")
-        convertFiles(project, args.inputPath, args.outputPath)
-        log("step 2 OK")
+        // The work root mirrors the project layout. We need both the project descriptors
+        // (pom.xml / build.gradle / .idea / etc.) AND the input source tree under the
+        // same relative path so IntelliJ resolves them consistently.
+        val workProjectRoot = workRoot.resolve("project")
+        val inputRelToProject = args.projectPath.relativize(args.inputPath)
+        log("step 1: copying project tree ${args.projectPath} -> $workProjectRoot")
+        copyProjectTree(args.projectPath, workProjectRoot)
+        val workInputRoot = workProjectRoot.resolve(inputRelToProject)
+        require(workInputRoot.isDirectory()) {
+            "After copy, work input root is missing: $workInputRoot"
+        }
+
+        log("step 2: opening project at $workProjectRoot")
+        val project = openProject(workProjectRoot)
+        log("step 2 OK: project=${project.name}, modules=${ModuleManager.getInstance(project).modules.size}")
+
+        try {
+            log("step 3: waiting for indexing (smart mode)")
+            DumbService.getInstance(project).waitForSmartMode()
+            log("step 3 OK")
+
+            log("step 4: invoking J2K via JavaToKotlinAction.Handler.convertFiles")
+            val stats = convertFilesInPlace(project, workInputRoot)
+            log("step 4 OK: attempted=${stats.attempted} converted=${stats.converted} failed=${stats.failed}")
+
+            log("step 5: moving converted .kt files to ${args.outputPath}")
+            val moved = collectAndMoveKtFiles(workInputRoot, args.outputPath)
+            log("step 5 OK: moved $moved .kt file(s)")
+        } finally {
+            log("step 6: closing project")
+            // forceCloseProject mutates project state and must run on the EDT.
+            ApplicationManager.getApplication().invokeAndWait {
+                ProjectManagerEx.getInstanceEx().forceCloseProject(project)
+            }
+            log("step 6 OK")
+        }
     }
 
     private fun openProject(path: Path): Project {
         val task = OpenProjectTask {
-            forceOpenInNewFrame = true
             isNewProject = false
-            // Skip auto-import / external system configuration; we don't need a build model
-            // for J2K to produce reasonable output, and configurators tend to hang in headless
-            // mode on bare directories.
-            runConfigurators = false
+            forceOpenInNewFrame = true
+            // Run configurators so Maven/Gradle import attaches an SDK + dependencies.
+            // Without this, J2K falls back to lexical conversion (no type resolution).
+            runConfigurators = true
         }
-        // Try the auto-import-aware path first (handles Maven/Gradle/.idea projects).
-        val project = ProjectUtil.openOrImport(path, task)
-            ?: ProjectManagerEx.getInstanceEx().openProject(path, task)
+        return ProjectManagerEx.getInstanceEx().openProject(path, task)
             ?: error("Failed to open project at $path")
-        return project
+    }
+
+    private fun convertFilesInPlace(project: Project, inputRoot: Path): ConversionStats {
+        val inputVfs = LocalFileSystem.getInstance().refreshAndFindFileByNioFile(inputRoot)
+            ?: error("Input directory not found in VFS: $inputRoot")
+
+        // Collect PsiJavaFiles + a module to attribute conversion to. Both touch the
+        // workspace model, so do it inside a read action.
+        val (javaFiles, module) = ReadAction.compute<Pair<List<PsiJavaFile>, Module?>, RuntimeException> {
+            val files = collectJavaFiles(inputVfs, project)
+            val mod = files.firstOrNull()?.let { pickModule(it) }
+            files to mod
+        }
+        log("  collected ${javaFiles.size} .java file(s); module=${module?.name ?: "<none>"}")
+        if (javaFiles.isEmpty()) {
+            return ConversionStats(0, 0, 0)
+        }
+        requireNotNull(module) {
+            "No module owns the input files. Project import may have failed — check that " +
+                "the project root has a build.gradle / pom.xml IntelliJ can resolve."
+        }
+
+        // Handler.convertFiles wraps things in WriteCommandAction + ProgressManager,
+        // both of which require the EDT. Dispatch from our pooled thread via invokeAndWait.
+        val app = ApplicationManager.getApplication()
+        val resultRef = AtomicReference<List<KtFile>>()
+        val errorRef = AtomicReference<Throwable?>(null)
+        app.invokeAndWait {
+            try {
+                resultRef.set(
+                    JavaToKotlinAction.Handler.convertFiles(
+                        files = javaFiles,
+                        project = project,
+                        module = module,
+                        enableExternalCodeProcessing = true,
+                        askExternalCodeProcessing = false,
+                        forceUsingOldJ2k = false
+                    )
+                )
+            } catch (t: Throwable) {
+                errorRef.set(t)
+            }
+        }
+        errorRef.get()?.let {
+            throw RuntimeException("J2K conversion threw on batch of ${javaFiles.size} files", it)
+        }
+        val converted = resultRef.get() ?: emptyList()
+        return ConversionStats(
+            attempted = javaFiles.size,
+            converted = converted.size,
+            failed = javaFiles.size - converted.size
+        )
+    }
+
+    private fun collectJavaFiles(root: VirtualFile, project: Project): List<PsiJavaFile> {
+        val psiManager = PsiManager.getInstance(project)
+        val out = mutableListOf<PsiJavaFile>()
+        VfsUtil.visitChildrenRecursively(root, object : VirtualFileVisitor<Unit>() {
+            override fun visitFile(file: VirtualFile): Boolean {
+                if (file.isDirectory) return true
+                if (file.extension != "java") return true
+                (psiManager.findFile(file) as? PsiJavaFile)?.let(out::add)
+                return true
+            }
+        })
+        return out
+    }
+
+    private fun pickModule(file: PsiJavaFile): Module? {
+        val vFile = file.virtualFile ?: return null
+        val mm = ModuleManager.getInstance(file.project)
+        return mm.modules.firstOrNull { it.moduleContentScope.contains(vFile) }
+            ?: mm.modules.firstOrNull()
+    }
+
+    /**
+     * Copies the project tree from [src] to [dst], skipping noisy/derived directories
+     * that would balloon the copy and aren't needed for IntelliJ to open the project.
+     */
+    private fun copyProjectTree(src: Path, dst: Path) {
+        val excludedDirNames = setOf(
+            ".git", ".gradle", ".idea", "build", "target", "out", "node_modules"
+        )
+        Files.walk(src).use { stream ->
+            stream.forEach { source ->
+                val rel = src.relativize(source)
+                // Skip any path component that matches an excluded dir name.
+                if ((0 until rel.nameCount).any { rel.getName(it).toString() in excludedDirNames }) {
+                    return@forEach
+                }
+                val target = dst.resolve(rel)
+                if (Files.isDirectory(source)) {
+                    if (!target.exists()) Files.createDirectories(target)
+                } else {
+                    target.parent?.let { if (!it.exists()) Files.createDirectories(it) }
+                    Files.copy(source, target, StandardCopyOption.REPLACE_EXISTING)
+                }
+            }
+        }
+    }
+
+    /**
+     * After conversion, walks [workInputRoot] for `.kt` files and moves them to
+     * [outputPath] preserving the relative path under [workInputRoot]. Returns the
+     * number of files moved.
+     */
+    private fun collectAndMoveKtFiles(workInputRoot: Path, outputPath: Path): Int {
+        var moved = 0
+        Files.walk(workInputRoot).use { stream ->
+            stream.forEach { source ->
+                if (Files.isRegularFile(source) && source.toString().endsWith(".kt")) {
+                    val rel = workInputRoot.relativize(source)
+                    val dest = outputPath.resolve(rel)
+                    dest.parent?.createDirectories()
+                    Files.move(source, dest, StandardCopyOption.REPLACE_EXISTING)
+                    moved++
+                }
+            }
+        }
+        return moved
     }
 
     private fun log(msg: String) {
         println("[j2k-runner] $msg")
         System.out.flush()
     }
-
-    private suspend fun convertFiles(project: Project, inputPath: Path, outputPath: Path) {
-        log("  walk: scanning .java files under $inputPath")
-        val javaFiles = mutableListOf<Path>()
-        Files.walk(inputPath).use { stream ->
-            stream.forEach { p ->
-                if (Files.isRegularFile(p) && p.toString().endsWith(".java")) {
-                    javaFiles.add(p)
-                }
-            }
-        }
-        if (javaFiles.isEmpty()) {
-            log("  walk: no .java files found")
-            return
-        }
-        log("  walk: discovered ${javaFiles.size} .java file(s)")
-
-        log("  psi: resolving files via PsiManager (read action)")
-        val psiFiles: List<PsiJavaFile> = ReadAction.compute<List<PsiJavaFile>, Throwable> {
-            val psiManager = PsiManager.getInstance(project)
-            val lfs = LocalFileSystem.getInstance()
-            javaFiles.mapNotNull { p ->
-                val vf = lfs.refreshAndFindFileByPath(p.absolutePathString())
-                if (vf == null) {
-                    System.err.println("[j2k-runner] VFS miss: $p"); null
-                } else {
-                    val psi = psiManager.findFile(vf)
-                    if (psi !is PsiJavaFile) {
-                        System.err.println("[j2k-runner] not PsiJavaFile (got ${psi?.javaClass?.simpleName ?: "null"}): $p"); null
-                    } else {
-                        psi
-                    }
-                }
-            }
-        }
-        log("  psi: resolved ${psiFiles.size}/${javaFiles.size} as PsiJavaFile")
-        if (psiFiles.isEmpty()) error("Could not resolve any .java files as PsiJavaFile")
-
-        // The Kotlin plugin's mode determines which converter implementation is loaded;
-        // pick the matching kind so we don't ask for an extension that wasn't registered.
-        val kind = if (KotlinPluginModeProvider.isK2Mode()) {
-            J2kConverterExtension.Kind.K2
-        } else {
-            J2kConverterExtension.Kind.K1_NEW
-        }
-        log("  j2k: kind=$kind (K2 mode=${KotlinPluginModeProvider.isK2Mode()})")
-        val ext = J2kConverterExtension.extension(kind)
-        val module: Module? = ModuleManager.getInstance(project).modules.firstOrNull()
-        val settings = ConverterSettings.defaultSettings
-        log("  j2k: building converter (module=${module?.name ?: "<none>"})")
-        val converter = ext.createJavaToKotlinConverter(project, module, settings)
-        val postProcessor = ext.createPostProcessor()
-
-        log("  j2k: calling filesToKotlin (suspend, dispatched off-EDT by ModernApplicationStarter)…")
-        val result = try {
-            converter.filesToKotlin(psiFiles, postProcessor)
-        } catch (t: Throwable) {
-            System.err.println("[j2k-runner]   j2k: filesToKotlin threw ${t.javaClass.name}: ${t.message}")
-            t.printStackTrace(System.err)
-            throw t
-        }
-        log("  j2k: filesToKotlin returned ${result.results.size} result(s)")
-
-        // FilesResult.results is List<String> parallel to the input file list.
-        check(result.results.size == psiFiles.size) {
-            "J2K returned ${result.results.size} results for ${psiFiles.size} input files"
-        }
-        var written = 0
-        for ((index, kotlinCode) in result.results.withIndex()) {
-            val psi = psiFiles[index]
-            val src = Paths.get(psi.virtualFile.path)
-            val rel = src.relativeTo(inputPath)
-            val parentRel = rel.parent ?: Paths.get("")
-            val ktName = rel.fileName.toString().removeSuffix(".java") + ".kt"
-            val out = outputPath.resolve(parentRel).resolve(ktName)
-            out.parent?.createDirectories()
-            out.writeText(kotlinCode)
-            log("    wrote ${out.relativeTo(outputPath)}")
-            written++
-        }
-        log("converted $written / ${javaFiles.size} file(s)")
-    }
 }
+
+private data class ConversionStats(val attempted: Int, val converted: Int, val failed: Int)
