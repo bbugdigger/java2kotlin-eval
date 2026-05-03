@@ -1,13 +1,13 @@
 [versions]
-kotlin = "2.2.21"
-intellijPlatform = "2025.1"
-intellijPlatformGradlePlugin = "2.16.0"
-junit = "5.11.0"
+kotlin = "1.9.24"
+intellijPlatform = "2024.1.7"
+intellijPlatformGradlePlugin = "2.5.0"
+junit = "5.10.2"
 
 [libraries]
 kotlin-compiler-embeddable = { module = "org.jetbrains.kotlin:kotlin-compiler-embeddable", version.ref = "kotlin" }
 junit-jupiter = { module = "org.junit.jupiter:junit-jupiter", version.ref = "junit" }
-junit-platform-launcher = { module = "org.junit.platform:junit-platform-launcher", version = "1.11.0" }
+junit-platform-launcher = { module = "org.junit.platform:junit-platform-launcher", version = "1.10.2" }
 
 [plugins]
 kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
