@@ -1,7 +1,7 @@
 [versions]
 kotlin = "2.2.21"
 intellijPlatform = "2025.1"
-intellijPlatformGradlePlugin = "2.0.1"
+intellijPlatformGradlePlugin = "2.16.0"
 junit = "5.11.0"
 
 [libraries]

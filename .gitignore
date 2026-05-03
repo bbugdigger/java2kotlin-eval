@@ -4,6 +4,9 @@ build/
 !gradle/wrapper/gradle-wrapper.jar
 !gradle/wrapper/gradle-wrapper.properties
 
+# IntelliJ Platform Gradle plugin cache
+.intellijPlatform/
+
 # IntelliJ IDEA
 .idea/
 *.iml
@@ -34,3 +37,7 @@ build/reports/
 
 # Local Gradle cache override
 local.properties
+
+# Phase 1 verification fixture (kept out of git; regenerable)
+sample-java/
+
