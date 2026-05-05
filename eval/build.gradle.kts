@@ -73,3 +73,46 @@ tasks.register<JavaExec>("runEval") {
         )
     })
 }
+
+// Edge-case verdict pass. Reads the dataset, looks up each case's converted .kt under
+// the converted root, runs the per-case verdict logic.
+//
+// Usage: typically driven through the root `runEdgeCases` orchestrator, which takes
+// care of staging + conversion first. Direct invocation:
+//   ./gradlew :eval:runEdgeCases -Ptarget=edge-cases
+//
+// Falls back to -Pedgecases.{dataset,converted,out} for ad-hoc runs.
+tasks.register<JavaExec>("runEdgeCases") {
+    group = "j2k-eval"
+    description = "Run the per-case verdict engine over the edge-case dataset. " +
+        "Use -Ptarget=edge-cases (preferred)."
+
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass.set("io.github.bbugdigger.j2keval.eval.EdgeCaseEvalMainKt")
+
+    val rootDir = rootProject.projectDir
+    fun toAbs(p: String): String {
+        val f = File(p)
+        return if (f.isAbsolute) f.absolutePath else File(rootDir, p).absolutePath
+    }
+
+    val targetName = providers.gradleProperty("target")
+    val explicitDataset = providers.gradleProperty("edgecases.dataset")
+    val explicitConverted = providers.gradleProperty("edgecases.converted")
+    val explicitOut = providers.gradleProperty("edgecases.out")
+    val targets = evalTargets
+
+    argumentProviders.add(CommandLineArgumentProvider {
+        val tgt = targetName.orNull?.let { targets[it] }
+        // For the edge-cases preset: dataset is goldDir ("edge-cases"), converted is outputDir,
+        // out is reportDir.
+        val dataset = tgt?.get("goldDir") ?: explicitDataset.orNull
+        val converted = tgt?.get("outputDir") ?: explicitConverted.orNull
+        val out = tgt?.get("reportDir") ?: explicitOut.orNull
+        listOfNotNull(
+            dataset?.let { "--dataset=${toAbs(it)}" },
+            converted?.let { "--converted=${toAbs(it)}" },
+            out?.let { "--out=${toAbs(it)}" }
+        )
+    })
+}
