@@ -12,6 +12,25 @@ Each hypothesis is paired with one or more curated test cases under `edge-cases/
 
 The "Confirmed" status means the converted output diverges from the gold expected.kt in the way the claim predicts. "Refuted" means J2K does the right (idiomatic) thing — also a valid finding.
 
+## Summary (post-Phase 10)
+
+| H# | Title | Status |
+|---|---|---|
+| H1 | No expression-body functions | Confirmed |
+| H2 | No getter/setter property folding | Partial |
+| H3 | No data-class inference from POJOs | Confirmed |
+| H4 | Avoids `!!` entirely | Confirmed |
+| H5 | Converts `+`-concat to string templates | Confirmed (substantively refuted — see H5 entry) |
+| H6 | No Java records → data class | Partial (substantively refuted) |
+| H7 | Preserves nested anonymous classes | Confirmed (worse than predicted — produces broken Kotlin) |
+| H8 | Propagates JSR-305 nullability | Inconclusive (eval-side classpath limit; see H8 entry) |
+| H9 | Drops `throws` clauses | Partial (substantively refuted — emits `@Throws`) |
+| H10 | Loses switch fallthrough semantics | Partial (substantively refuted — duplicates body) |
+| H11 | Converts `synchronized` correctly | Partial |
+| H12 | No `Optional<T>` unwrapping | Confirmed |
+
+The narrative companion ([`edge-cases-report.md`](edge-cases-report.md)) interprets these results in detail and calls out the surprising wins (H6, H9, H10, H11 partials) and real bugs (missing `override` modifier, `synchronized` block type mismatch, `Optional` nullability decoration, smart-cast on mutable `var`).
+
 ## H1: J2K never produces expression-body functions
 
 **Claim (falsifiable).** When a Java method body is exactly `return <expr>;`, J2K emits a Kotlin function with an explicit `{ return … }` block body, never the equivalent `fun foo(): T = expr` expression body.
@@ -22,8 +41,8 @@ The "Confirmed" status means the converted output diverges from the gold expecte
 - `edge-cases/expression-body/simple-return-fn/`
 - `edge-cases/expression-body/computed-property/`
 
-**Status:** Untested
-**Evidence:** _(filled in Phase 10)_
+**Status:** Confirmed
+**Evidence:** `simple-return-fn` Partial — converted has `expr-body fn: -4, block-body fn: +4` (J2K wrapped both `Calculator.sum` and `Calculator.format` in `{ return ... }` blocks). `computed-property` Fail (NoMatchingDeclarations) — separate H2 issue but the converted body bodies are also block-wrapped. Confirmed across every multi-statement case in the dataset; H1 is the universal Partial driver in this report.
 
 ## H2: J2K does not fold private fields with public getters/setters into Kotlin properties
 
@@ -36,8 +55,8 @@ The "Confirmed" status means the converted output diverges from the gold expecte
 - `edge-cases/property-folding/getter-only/`
 - `edge-cases/property-folding/setter-only/`
 
-**Status:** Untested
-**Evidence:** _(filled in Phase 10)_
+**Status:** Partial
+**Evidence:** `setter-only` Pass (negative-control case — J2K correctly preserved the write-only setter). `simple-bean` Partial: idiom delta `block-body fn: +4` (J2K kept all four `getX`/`setX` as separate functions instead of folding into Kotlin properties). `getter-only` Partial: idiom delta `block-body fn: +1` (J2K kept `getName` as a function despite the field being `final` — perfect candidate for primary-ctor `val`). The bean-style cases confirm the prediction; the negative-control refutes it where the prediction shouldn't apply.
 
 ## H3: J2K does not infer `data class` from POJOs that satisfy the data-class shape
 
@@ -49,8 +68,8 @@ The "Confirmed" status means the converted output diverges from the gold expecte
 - `edge-cases/pojo-data-class/pojo-equals-hashcode/`
 - `edge-cases/pojo-data-class/pojo-with-toString/`
 
-**Status:** Untested
-**Evidence:** _(filled in Phase 10)_
+**Status:** Confirmed
+**Evidence:** Both POJO cases failed — converted output didn't compile. Errors include "`hashCode` hides member of supertype 'Any' and needs 'override' modifier" (real bug — J2K dropped the `override` keyword from converted `equals`/`hashCode`/`toString`), "Unresolved reference: compare" (J2K couldn't translate `Double.compare` static), and "Operator '===' cannot be applied to 'Coordinate' and 'Object?'" (J2K's `equals` body has type-check issues). No `data class` inference was attempted in either case — every member from the Java source is preserved verbatim.
 
 ## H4: J2K avoids non-null assertions (`!!`) entirely
 
@@ -62,8 +81,8 @@ The "Confirmed" status means the converted output diverges from the gold expecte
 - `edge-cases/nullability/null-check-then-call/`
 - `edge-cases/nullability/optional-chain/`
 
-**Status:** Untested
-**Evidence:** _(filled in Phase 10)_
+**Status:** Confirmed
+**Evidence:** Both cases avoided `!!` (consistent with the prediction). `null-check-then-call` Partial: J2K used `?.let { "Hello, ${it.uppercase()}" } ?: "Hello, anonymous"` — different shape than the gold's smart-cast `if`-branch, but also valid. `optional-chain` Fail (DoesNotCompile): "Smart cast to 'Address' is impossible, because 'address' is a mutable property" — J2K kept the `if (a != null && a.b != null)` chain verbatim, but Kotlin disallows the smart-cast across statements when the receiver is `var`. Idiomatic answer would be `address?.city ?: "unknown"`.
 
 ## H5: J2K converts Java string concatenation to Kotlin string templates
 
@@ -76,8 +95,8 @@ The "Confirmed" status means the converted output diverges from the gold expecte
 - `edge-cases/string-templates/mixed-types-concat/`
 - `edge-cases/string-templates/multi-arg-concat/`
 
-**Status:** Untested
-**Evidence:** _(filled in Phase 10)_
+**Status:** Confirmed
+**Evidence:** All 3 cases got Partial verdicts. J2K *does* perform the `+`-to-template transform correctly across simple, mixed-type, and nested-expression operands. The Partial verdict is purely H1 bleed: `expr-body fn: -2, block-body fn: +2` on each case (the surrounding function bodies are wrapped in blocks). On the substantive question of string interpolation, this hypothesis is effectively refuted — J2K does the right structural transform.
 
 ## H6: J2K does not convert Java records to Kotlin data classes
 
@@ -89,8 +108,8 @@ The "Confirmed" status means the converted output diverges from the gold expecte
 - `edge-cases/records/java-record-basic/`
 - `edge-cases/records/java-record-with-method/`
 
-**Status:** Untested
-**Evidence:** _(filled in Phase 10)_
+**Status:** Partial (substantively refuted)
+**Evidence:** `java-record-basic` Pass — J2K produced `@kotlin.jvm.JvmRecord data class Point(val x: Int, val y: Int)`, complete with the `@JvmRecord` annotation for full Java-side compatibility. `java-record-with-method` Partial: same `data class` structure preserved, but the two methods (`span`, `contains`) come back as `block-body fn: +4` (H1 bleed). Required `jvmTarget=17` in the compilability check; lower targets reject `@JvmRecord` and the verdict comes back Fail (a tooling-side false negative). On the substantive question of "does J2K convert records to data classes," this is **refuted**.
 
 ## H7: J2K preserves nested anonymous classes verbatim instead of collapsing to lambdas
 
@@ -102,8 +121,8 @@ The "Confirmed" status means the converted output diverges from the gold expecte
 - `edge-cases/anonymous-classes/nested-anonymous-runnable/`
 - `edge-cases/anonymous-classes/anonymous-with-state/`
 
-**Status:** Untested
-**Evidence:** _(filled in Phase 10)_
+**Status:** Confirmed (worse than predicted)
+**Evidence:** Both cases failed to compile — but not for the predicted reason of "kept as anonymous instead of lambda." J2K kept the anonymous class form (matches the prediction) but emitted invalid Kotlin syntax: `Runnable() { override fun run() { ... } }` instead of `object : Runnable { ... }`, plus `'run' hides member of supertype 'Runnable' and needs 'override' modifier` (the same missing-`override` bug we see in the POJO cases). The prediction was that J2K would produce *correct-but-non-idiomatic* code; in fact it produces *broken* code.
 
 ## H8: J2K propagates JSR-305 / `@Nullable` / `@NotNull` annotations into Kotlin nullable / non-null types
 
@@ -114,8 +133,8 @@ The "Confirmed" status means the converted output diverges from the gold expecte
 **Edge cases testing this:**
 - `edge-cases/nullability/jsr305-nullable/`
 
-**Status:** Untested
-**Evidence:** _(filled in Phase 10)_
+**Status:** Inconclusive (recorded as Confirmed by the runner)
+**Evidence:** Marked Confirmed by the rollup logic because the case failed to compile, but the failure is `Unresolved reference: Nullable / NotNull` — i.e., the annotation references can't be resolved without `org.jetbrains:annotations` on the classpath, which our stdlib-only compilability check doesn't provide. **This is an eval-side limitation, not a J2K finding.** Inspecting the converted output directly shows J2K preserved the `@Nullable` / `@NotNull` annotation references; whether Kotlin would treat them as nullability hints (refuting the hypothesis) or just as orphan annotations (confirming it) depends on the resolution context. Re-run with the annotations jar on the classpath to get a real verdict.
 
 ## H9: J2K silently drops Java's `throws` declarations (since Kotlin has no checked exceptions)
 
@@ -127,8 +146,8 @@ The "Confirmed" status means the converted output diverges from the gold expecte
 - `edge-cases/checked-exceptions/throws-ioexception/`
 - `edge-cases/checked-exceptions/throws-multiple/`
 
-**Status:** Untested
-**Evidence:** _(filled in Phase 10)_
+**Status:** Partial (substantively refuted)
+**Evidence:** `throws-multiple` Pass — J2K emitted `@kotlin.Throws(IOException::class, SQLException::class)`, preserving every Java throws-clause type. `throws-ioexception` Partial: also emitted `@kotlin.Throws(IOException::class)` correctly; the Partial verdict comes only from the H1 block-body delta. **Refuted on the substantive question.** The hypothesis predicted J2K would silently drop the throws contract; in fact it generates the correct `@Throws` annotation for Java-side compatibility.
 
 ## H10: J2K's switch → when conversion loses fallthrough semantics
 
@@ -140,8 +159,19 @@ The "Confirmed" status means the converted output diverges from the gold expecte
 - `edge-cases/switch-statements/switch-fallthrough/`
 - `edge-cases/switch-statements/switch-no-default/`
 
-**Status:** Untested
-**Evidence:** _(filled in Phase 10)_
+**Status:** Partial (substantively refuted)
+**Evidence:** `switch-fallthrough` Pass — J2K **duplicated the case-2 body into case-1** to preserve fallthrough semantics:
+
+```kotlin
+when (code) {
+    1 -> { out.append("one"); out.append("two") }  // body of case 2 inlined
+    2 -> out.append("two")
+    3 -> out.append("three")
+    else -> out.append("other")
+}
+```
+
+`switch-no-default` Partial: J2K correctly produced a `when` over the integer with all branches; Partial verdict is H1 block-body bleed. **Refuted on the substantive question.** This is one of the more impressive J2K transforms — semantic-preserving rewrites of Java switch are non-trivial.
 
 ## H11: J2K converts Java `synchronized` blocks/methods to Kotlin `synchronized(...) { }` calls
 
@@ -153,8 +183,8 @@ The "Confirmed" status means the converted output diverges from the gold expecte
 - `edge-cases/concurrency/synchronized-method/`
 - `edge-cases/concurrency/synchronized-block/`
 
-**Status:** Untested
-**Evidence:** _(filled in Phase 10)_
+**Status:** Partial
+**Evidence:** `synchronized-method` Pass — J2K emitted `@kotlin.jvm.Synchronized` on the function (correct, idiomatic). `synchronized-block` Fail (DoesNotCompile): "Type mismatch: inferred type is Object? but Any was expected" — J2K converted `synchronized (lock) { ... }` to a Kotlin form that won't type-check. The `lock` field was declared as `private final Object lock = new Object()`; J2K kept `Any?` for the lock type but the stdlib `synchronized(...)` overload requires `Any` (non-null). Real bug on the block form; correct conversion of the modifier form.
 
 ## H12: J2K does not unwrap `java.util.Optional<T>` to Kotlin `T?`
 
@@ -166,8 +196,8 @@ The "Confirmed" status means the converted output diverges from the gold expecte
 - `edge-cases/nullability/optional-return/`
 - `edge-cases/nullability/optional-map-chain/`
 
-**Status:** Untested
-**Evidence:** _(filled in Phase 10)_
+**Status:** Confirmed
+**Evidence:** Both Optional cases failed to compile. `optional-return`: "Type mismatch: inferred type is Optional<String> but Optional<String?>? was expected" — J2K added `?` decorations around `Optional<...>` in some places but not consistently, producing a contradictory return-type annotation. `optional-map-chain`: "Only safe (?.) or non-null asserted (!!.) calls are allowed on a nullable receiver of type Optional<String?>?" plus type-inference failures on `String::trim` callable references. J2K preserved the entire `.map().filter().orElse()` chain verbatim — confirming the prediction that no unwrapping is attempted.
 
 ---
 

@@ -79,6 +79,9 @@ class CompilabilityChecker(
                 noStdlib = true
                 noReflect = true
                 suppressWarnings = true
+                // JVM 17 lets us validate code that uses Java records (J2K emits
+                // @kotlin.jvm.JvmRecord data class ...), records require -jvm-target ≥ 16.
+                jvmTarget = "17"
                 if (cpEntries.isNotEmpty()) {
                     classpath = cpEntries.joinToString(File.pathSeparator) {
                         it.toAbsolutePath().toString()
