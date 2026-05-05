@@ -1,0 +1,99 @@
+name: j2k-eval
+
+# Triggers:
+#  - workflow_dispatch: manual button on the Actions tab
+#  - pull_request: every PR run end-to-end so reviewers see the eval delta
+#  - push to main: post-merge run for the canonical history
+#
+# Doc-only changes don't change conversion behaviour, so skip CI on them.
+on:
+  workflow_dispatch:
+  pull_request:
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+
+# Cancel an in-progress run on the same ref when a new commit lands.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  eval:
+    name: eval ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    strategy:
+      # Don't kill the petclinic run if a future target fails.
+      fail-fast: false
+      matrix:
+        target:
+          - spring-petclinic
+
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle (cached)
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Make gradle wrapper executable
+        run: chmod +x gradlew
+
+      # Even with -Djava.awt.headless=true, the IntelliJ launcher probes the X11
+      # environment on Linux and fails if no display exists. Xvfb is a virtual
+      # framebuffer X server; xvfb-run wraps the gradle invocation in one.
+      - name: Install Xvfb (virtual X display for IntelliJ)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends xvfb
+
+      - name: Run end-to-end eval (convert + score) under Xvfb
+        run: xvfb-run -a ./gradlew runEval -Ptarget=${{ matrix.target }} --no-daemon --console=plain
+
+      - name: Append report to job summary
+        if: always()
+        run: |
+          REPORT="build/reports/${{ matrix.target }}/report.md"
+          if [ -f "$REPORT" ]; then
+            cat "$REPORT" >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "## ⚠️ No report.md produced for \`${{ matrix.target }}\`"
+              echo
+              echo "The pipeline failed before the eval engine could write its output."
+              echo "See the IDE log artifact for details."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload eval report + converted output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-${{ matrix.target }}
+          if-no-files-found: warn
+          path: |
+            build/reports/${{ matrix.target }}/**
+            build/converted/${{ matrix.target }}/**
+
+      - name: Upload IDE sandbox log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ide-log-${{ matrix.target }}
+          if-no-files-found: ignore
+          path: .intellijPlatform/sandbox/**/log/**/*.log
