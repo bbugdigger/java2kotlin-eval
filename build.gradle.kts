@@ -33,6 +33,19 @@ val evalTargets: Map<String, Map<String, String>> = mapOf(
         "reportDir" to "build/reports/spring-petclinic",
         "openType" to "Maven",
     ),
+    // OkHttp: same upstream repo (square/okhttp) checked out at two different tags.
+    //   targets/okhttp-java   = parent-3.14.2 (last 3.x = last all-Java release)
+    //   targets/okhttp-kotlin = parent-4.12.0 (mature stable point of the Kotlin port)
+    // We convert only the `okhttp/` subproject's Java source — the other modules
+    // (mockwebserver, okhttp-tls, okhttp-sse, etc.) are out of scope for v1.
+    "okhttp" to mapOf(
+        "projectDir" to "targets/okhttp-java",
+        "inputDir" to "targets/okhttp-java/okhttp/src/main/java",
+        "outputDir" to "build/converted/okhttp",
+        "goldDir" to "targets/okhttp-kotlin/okhttp/src/main/kotlin",
+        "reportDir" to "build/reports/okhttp",
+        "openType" to "Maven",
+    ),
     // Edge-cases is a "synthetic target": its inputs are staged from the edge-cases/
     // dataset by the stageEdgeCases task. The runner converts the staged tree;
     // the eval module then runs the per-case verdict logic instead of the fuzzy

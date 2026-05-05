@@ -30,11 +30,12 @@ jobs:
     timeout-minutes: 45
 
     strategy:
-      # Don't kill the petclinic run if a future target fails.
+      # Don't kill the petclinic run if okhttp fails (or vice versa).
       fail-fast: false
       matrix:
         target:
           - spring-petclinic
+          - okhttp
 
     steps:
       - name: Checkout (with submodules)

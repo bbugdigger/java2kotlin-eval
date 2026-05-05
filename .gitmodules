@@ -4,3 +4,9 @@
 [submodule "targets/spring-petclinic-kotlin"]
 	path = targets/spring-petclinic-kotlin
 	url = https://github.com/spring-petclinic/spring-petclinic-kotlin.git
+[submodule "targets/okhttp-java"]
+	path = targets/okhttp-java
+	url = https://github.com/square/okhttp.git
+[submodule "targets/okhttp-kotlin"]
+	path = targets/okhttp-kotlin
+	url = https://github.com/square/okhttp.git
