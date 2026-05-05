@@ -38,10 +38,17 @@ jobs:
           - okhttp
 
     steps:
-      - name: Checkout (with submodules)
+      - name: Checkout (with submodules, top-level only)
         uses: actions/checkout@v4
         with:
-          submodules: recursive
+          # `true` fetches our top-level submodules (the targets/ trees) but does NOT
+          # recurse into nested submodules. OkHttp 3.14.2 has its own
+          # `okhttp-hpacktests/.../hpack-test-case` submodule that uses the deprecated
+          # `git://` protocol (GitHub disabled the unauthenticated git:// transport in
+          # 2022, port 9418 now hangs). We don't need any of OkHttp's test-resource
+          # submodules — only the source trees under okhttp/src/main/java and
+          # okhttp/src/main/kotlin — so non-recursive checkout is correct.
+          submodules: true
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
