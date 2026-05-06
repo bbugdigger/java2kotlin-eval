@@ -100,6 +100,9 @@ tasks.register<JavaExec>("runEdgeCases") {
     val explicitDataset = providers.gradleProperty("edgecases.dataset")
     val explicitConverted = providers.gradleProperty("edgecases.converted")
     val explicitOut = providers.gradleProperty("edgecases.out")
+    // Phase-12 OverrideFixup toggle. Default: true (apply fixups). Override with
+    // -Pedgecases.applyFixups=false to compare against the unfixed verdict.
+    val applyFixups = providers.gradleProperty("edgecases.applyFixups").orElse("true")
     val targets = evalTargets
 
     argumentProviders.add(CommandLineArgumentProvider {
@@ -112,7 +115,8 @@ tasks.register<JavaExec>("runEdgeCases") {
         listOfNotNull(
             dataset?.let { "--dataset=${toAbs(it)}" },
             converted?.let { "--converted=${toAbs(it)}" },
-            out?.let { "--out=${toAbs(it)}" }
+            out?.let { "--out=${toAbs(it)}" },
+            "--apply-fixups=${applyFixups.get()}"
         )
     })
 }

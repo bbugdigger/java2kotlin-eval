@@ -209,3 +209,48 @@ CI runs the full edge-case pipeline on every push and PR; the rendered Markdown 
 1. **Phase 12 (optional fix) candidates.** The "missing override modifier" cluster is the largest concrete bug class — 6 cases. Fixable by tweaking J2K's PSI tree builder (or by adding a post-conversion fixup in our pipeline). The smart-cast-vs-mutable-property issue is the next biggest correctness gap.
 2. **The compilability check is a useful signal.** Of 25 cases, 10 fail at the compile step alone — i.e., **40 % of converted code in our edge-case dataset doesn't even type-check**. For OkHttp this proportion may be very different (Kotlin-aware imports, more uniform shape).
 3. **The "J2K's right answers" list (H6, H9, H10, H11 partials) is itself useful evidence** for any JetBrains team member reading this: J2K is doing more right than the spring-petclinic numbers suggested, and the bottleneck on idiomatic output is overwhelmingly the post-processor (which we documented can't run cleanly in headless mode — Phase 1+2 finding).
+
+## Phase 12 fix impact — `OverrideFixup` pass
+
+Phase 12 ships an `OverrideFixup` pass in the eval module (`eval/src/main/kotlin/.../OverrideFixup.kt`) plus a proposed J2K patch document ([`proposed-j2k-fix.md`](proposed-j2k-fix.md)).
+
+The fixup is **on by default** for `runEdgeCases` — pass `-Pedgecases.applyFixups=false` to disable for comparison. Pre-fixup converted output is preserved at `build/reports/edge-cases/converted-pre-fixup/` so you can diff to see exactly what got changed.
+
+### Numbers
+
+| Metric | Value |
+|---|---:|
+| Fixups applied (lines where `override ` was prepended) | 6 |
+| Files modified | 4 |
+| Compile errors resolved by fixup | 5 |
+| Files that newly compile cleanly post-fixup | **0** |
+| Verdict counts (before vs after fixup) | unchanged: 5 Pass / 10 Partial / 10 Fail |
+
+### Why the verdict counts didn't move
+
+The 4 affected files (`anonymous-classes/anonymous-with-state`, `anonymous-classes/nested-anonymous-runnable`, `pojo-data-class/pojo-equals-hashcode`, `pojo-data-class/pojo-with-toString`) all have **other compile errors** beyond just the missing `override`:
+
+- Both `anonymous-classes/*` cases hit the **parens-on-interface bug** — J2K emits `object : Runnable()` (with parens, treating Runnable as a class constructor) instead of `object : Runnable` (interface implementation). Our fixup adds the `override` modifier correctly, but the file still won't compile.
+- Both `pojo-data-class/*` cases have an `equals` method whose parameter type J2K kept as Java's `Object?` instead of Kotlin's `Any?`. As a result, `equals(o: Object?)` doesn't actually override `Any.equals(Any?)` — kotlinc says "incompatible types" rather than "needs override modifier." Our fixup correctly *doesn't* add `override` here (it would be wrong; the signature genuinely doesn't override anything). But the file still doesn't compile.
+
+So **the fixup does its job** — every line it touched is genuinely an override-modifier issue that's now resolved. It just doesn't single-handedly recover any case verdict, because cases that exhibit the override bug usually exhibit other bugs too.
+
+### What this validates
+
+- The override-modifier bug is **real, widespread, and worth fixing upstream**. Even on this small 25-case dataset it affects 4 distinct cases and 6 method declarations.
+- A pipeline-side text fixup is a viable workaround for downstream consumers — it's deterministic, validated by recompile, and correctly conservative (only fires when kotlinc explicitly says "needs override modifier").
+- The proposed J2K patch (in [`proposed-j2k-fix.md`](proposed-j2k-fix.md)) is the right *upstream* fix, but the cases that exhibit this bug usually exhibit OTHER bugs too — so even an upstream fix wouldn't single-handedly improve the Pass count on this dataset. Multiple co-occurring bugs is itself a finding: J2K's failures cluster, and addressing one bug class meaningfully requires addressing several.
+
+### Reproduction
+
+```bash
+# With fixups (default):
+./gradlew runEdgeCases -Ptarget=edge-cases
+cat build/reports/edge-cases/report.md           # Check the "Aggregate" banner
+
+# Without fixups (baseline):
+./gradlew runEdgeCases -Ptarget=edge-cases -Pedgecases.applyFixups=false
+
+# Diff what the fixup changed:
+diff -r build/reports/edge-cases/converted-pre-fixup/ build/converted/edge-cases/
+```

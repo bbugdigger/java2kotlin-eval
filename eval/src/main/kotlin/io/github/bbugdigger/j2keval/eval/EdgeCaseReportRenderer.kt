@@ -2,12 +2,12 @@ package io.github.bbugdigger.j2keval.eval
 
 object EdgeCaseReportRenderer {
 
-    fun renderMarkdown(summary: EdgeCaseRunSummary): String = buildString {
+    fun renderMarkdown(summary: EdgeCaseRunSummary, fixup: DirectoryFixupResult? = null): String = buildString {
         appendLine("# J2K edge case eval")
         appendLine()
         appendLine("Hand-curated stress tests under `edge-cases/`. Each case has a hypothesis-driven prediction; the verdict here either confirms or refutes it.")
         appendLine()
-        appendBanner(summary)
+        appendBanner(summary, fixup)
         appendLine()
         appendByHypothesis(summary)
         appendLine()
@@ -18,13 +18,21 @@ object EdgeCaseReportRenderer {
         appendFailures(summary)
     }
 
-    fun renderJson(summary: EdgeCaseRunSummary): String {
+    fun renderJson(summary: EdgeCaseRunSummary, fixup: DirectoryFixupResult? = null): String {
         val sb = StringBuilder()
         sb.append("{\n")
         sb.append("  \"totalCases\": ${summary.totalCases},\n")
         sb.append("  \"pass\": ${summary.passCount},\n")
         sb.append("  \"partial\": ${summary.partialCount},\n")
         sb.append("  \"fail\": ${summary.failCount},\n")
+        if (fixup != null) {
+            sb.append("  \"fixups\": {")
+            sb.append("\"applied\": ${fixup.totalFixupsApplied}, ")
+            sb.append("\"filesWithFixups\": ${fixup.filesWithFixups}, ")
+            sb.append("\"filesNowCompiling\": ${fixup.filesNowCompiling}, ")
+            sb.append("\"errorsResolved\": ${fixup.totalErrorsResolved}")
+            sb.append("},\n")
+        }
         sb.append("  \"hypotheses\": [\n")
         summary.byHypothesis.forEachIndexed { i, h ->
             sb.append("    {")
@@ -60,7 +68,7 @@ object EdgeCaseReportRenderer {
 
     // -- Markdown sections ----
 
-    private fun StringBuilder.appendBanner(s: EdgeCaseRunSummary) {
+    private fun StringBuilder.appendBanner(s: EdgeCaseRunSummary, fixup: DirectoryFixupResult?) {
         appendLine("## Aggregate")
         appendLine()
         appendLine("| Metric | Value |")
@@ -69,6 +77,13 @@ object EdgeCaseReportRenderer {
         appendLine("| ✅ Pass | ${s.passCount} |")
         appendLine("| 🟡 Partial | ${s.partialCount} |")
         appendLine("| ❌ Fail | ${s.failCount} |")
+        if (fixup != null) {
+            appendLine("| Phase-12 fixups applied (`override` modifier) | ${fixup.totalFixupsApplied} (across ${fixup.filesWithFixups} file${if (fixup.filesWithFixups == 1) "" else "s"}) |")
+            appendLine("| Files now compiling cleanly after fixup | ${fixup.filesNowCompiling} |")
+            appendLine("| Compile errors resolved by fixup | ${fixup.totalErrorsResolved} |")
+        } else {
+            appendLine("| Phase-12 fixups | _disabled (`--apply-fixups=false`)_ |")
+        }
     }
 
     private fun StringBuilder.appendByHypothesis(s: EdgeCaseRunSummary) {
